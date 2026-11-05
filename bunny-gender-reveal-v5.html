@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Bunny Gender Reveal</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; user-select: none; }
+  html, body { height: 100%; overflow: hidden; font-family: system-ui, -apple-system, sans-serif; background: #bfe59a; }
+  #app { position: fixed; inset: 0; display: flex; flex-direction: column; }
+  #stage { position: relative; flex: 1; min-height: 0;
+           background: linear-gradient(#cdeeff 0%, #e9fbe0 65%, #bfe59a 100%); }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #hud { position: absolute; top: 12px; left: 0; right: 0; text-align: center;
+         font-weight: 700; font-size: 18px; color: #3a4a5a; pointer-events: none; }
+  #controls { display: flex; gap: 12px; padding: 12px; background: #ffffffcc; }
+  .pad { position: relative; flex: 1; border: none; border-radius: 22px; padding: 28px 0;
+         font-size: 20px; font-weight: 800; color: #fff; cursor: pointer;
+         touch-action: manipulation; transition: transform .05s; }
+  .pad:active, .pad.flash { transform: scale(.96); }
+  .pad small { display: block; font-size: 14px; font-weight: 600; opacity: .9; margin-top: 4px; }
+  #pinkPad { background: #ff6fb5; box-shadow: 0 6px 0 #d9508f; }
+  #bluePad { background: #4aa8ff; box-shadow: 0 6px 0 #2c7fd0; }
+  .float { position: absolute; font-weight: 900; font-size: 22px; pointer-events: none;
+           animation: rise .8s ease-out forwards; }
+  @keyframes rise { to { transform: translateY(-60px); opacity: 0; } }
+  #overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+             flex-direction: column; text-align: center; padding: 24px;
+             background: rgba(255,255,255,.93); color: #2b3a4a; }
+  #overlay.show { display: flex; }
+  #overlay h1 { font-size: 32px; margin-bottom: 14px; }
+  #overlay p { font-size: 20px; line-height: 1.5; margin: 6px 0; }
+  #overlay .big { font-size: 56px; font-weight: 900; margin: 14px 0; }
+  #overlay button { margin-top: 22px; border: none; border-radius: 18px; padding: 16px 40px;
+                    font-size: 20px; font-weight: 800; color: #fff; background: #9b6bff; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="c"></canvas>
+    <div id="hud"></div>
+  </div>
+  <div id="controls">
+    <button class="pad" id="pinkPad">PINK 🐰<small id="pinkCount">0</small></button>
+    <button class="pad" id="bluePad">BLUE 🐰<small id="blueCount">0</small></button>
+  </div>
+</div>
+
+<div id="overlay"><div id="overlayContent"></div></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const hud = document.getElementById('hud');
+  const overlay = document.getElementById('overlay');
+  const overlayContent = document.getElementById('overlayContent');
+  const pinkPad = document.getElementById('pinkPad');
+  const bluePad = document.getElementById('bluePad');
+  const pinkCountEl = document.getElementById('pinkCount');
+  const blueCountEl = document.getElementById('blueCount');
+  const stage = document.getElementById('stage');
+
+  const GAME_MS = 60000;
+  const SHEEP_START = 10000;        // white sheep start coming out after 10s
+  const MIX_START = GAME_MS * 0.4;  // pink & blue sheep join after 24s
+  const PAD = 50;                   // creatures start fully on screen
+  const OFF = 60;                   // creatures leave fully off screen (no fade out)
+
+  const BUNNY = {
+    pink: { body: '#ffb0d6', inner: '#ffd6ea', line: '#e0609f' },
+    blue: { body: '#a6dcff', inner: '#dff3ff', line: '#3d93d6' }
+  };
+  const SHEEP = {
+    white: { wool: '#ffffff', face: '#5b5566' },
+    pink:  { wool: '#ffc7e6', face: '#5b5566' },
+    blue:  { wool: '#c6e8ff', face: '#5b5566' }
+  };
+  const WOOL_LINE = '#c3ccd8';
+
+  let W = 0, H = 0;
+  let plan = [], spawnTimes = [];
+  let rabbits = [], sheep = [], clouds = [];
+  let tapPink = 0, tapBlue = 0;
+  let startTime = 0, running = false, spawned = 0, lastT = 0;
+  let nextWhite = 0, nextPinkSheep = 0, nextBlueSheep = 0, nextCloud = 0;
+
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  function resize() {
+    const r = stage.getBoundingClientRect();
+    W = r.width; H = r.height;
+    canvas.width = W * devicePixelRatio;
+    canvas.height = H * devicePixelRatio;
+    ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+
+  // Hidden truth: starts roughly even, slowly tips to pink, always ends pink > blue.
+  function buildPlan(n) {
+    const colors = [];
+    let pinks = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / (n - 1);
+      const isPink = Math.random() < 0.5 + 0.14 * t;
+      colors.push(isPink ? 'pink' : 'blue');
+      if (isPink) pinks++;
+    }
+    let blues = n - pinks;
+    for (let i = n - 1; pinks <= blues && i >= 0; i--) {
+      if (colors[i] === 'blue') { colors[i] = 'pink'; pinks++; blues--; }
+    }
+    return colors;
+  }
+
+  // Starts fully on screen (fades in), travels in a straight line,
+  // and leaves fully off screen (no fade out).
+  function makeMover(type, color, speed) {
+    const sides = ['top', 'bottom', 'left', 'right'];
+    const start = side => {
+      switch (side) {
+        case 'top':    return { x: rand(PAD, W - PAD), y: PAD };
+        case 'bottom': return { x: rand(PAD, W - PAD), y: H - PAD };
+        case 'left':   return { x: PAD, y: rand(PAD, H - PAD) };
+        case 'right':  return { x: W - PAD, y: rand(PAD, H - PAD) };
+      }
+    };
+    const exit = side => {
+      switch (side) {
+        case 'top':    return { x: rand(0, W), y: -OFF };
+        case 'bottom': return { x: rand(0, W), y: H + OFF };
+        case 'left':   return { x: -OFF, y: rand(0, H) };
+        case 'right':  return { x: W + OFF, y: rand(0, H) };
+      }
+    };
+    const s = sides[Math.floor(Math.random() * 4)];
+    let e; do { e = sides[Math.floor(Math.random() * 4)]; } while (e === s);
+    const a = start(s), b = exit(e);
+    const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    return {
+      type, color, speed, len, traveled: 0,
+      sx: a.x, sy: a.y, ux: (b.x - a.x) / len, uy: (b.y - a.y) / len,
+      x: a.x, y: a.y, phase: Math.random() * 10
+    };
+  }
+
+  function makeRabbit(color) {
+    const fast = Math.random() < 0.35;               // about a third are ~2x faster
+    return makeMover('rabbit', color, fast ? rand(120, 180) : rand(55, 95));
+  }
+
+  function makeSheep(color) {
+    return makeMover('sheep', color, rand(45, 70));
+  }
+
+  function makeCloud() {
+    return { x: -160, y: rand(H * 0.05, H * 0.3), speed: rand(8, 14), s: rand(0.8, 1.3) };
+  }
+
+  // Fade in only: never fades out.
+  function alphaOf(e) {
+    return Math.min(1, e.traveled / 35);
+  }
+
+  function blush(x, y, r) {
+    ctx.fillStyle = 'rgba(255,110,150,.45)';
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function drawRabbit(r) {
+    const p = BUNNY[r.color];
+    const hop = Math.abs(Math.sin(r.phase)) * 9;
+    const dir = r.ux >= 0 ? 1 : -1;
+    ctx.save();
+    ctx.globalAlpha = alphaOf(r);
+    ctx.translate(r.x, r.y - hop);
+    ctx.scale(dir, 1);
+    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = p.line;
+
+    // fluffy tail
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(-19, -2, 6.5, 0, Math.PI * 2); ctx.fill();
+
+    // back feet
+    ctx.fillStyle = p.body;
+    ctx.beginPath(); ctx.ellipse(-8, 15, 9, 5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+    // long cute ears
+    [[-4, -27, -0.15], [9, -27, 0.2]].forEach(([x, y, rot]) => {
+      ctx.fillStyle = p.body;
+      ctx.beginPath(); ctx.ellipse(x, y, 6, 15, rot, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = p.inner;
+      ctx.beginPath(); ctx.ellipse(x, y + 1, 3, 10, rot, 0, Math.PI * 2); ctx.fill();
+    });
+
+    // round body
+    ctx.fillStyle = p.body;
+    ctx.beginPath(); ctx.ellipse(0, 5, 18, 15, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+    // front feet
+    ctx.beginPath(); ctx.ellipse(11, 16, 6, 4.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+    // big round head
+    ctx.beginPath(); ctx.arc(13, -5, 14, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+    // blush
+    blush(19, 1, 4);
+
+    // big sparkly eye
+    ctx.fillStyle = '#2b2b3a';
+    ctx.beginPath(); ctx.ellipse(16, -7, 3, 3.8, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(17.2, -8.6, 1.2, 0, Math.PI * 2); ctx.fill();
+
+    // little pink nose and smile
+    ctx.fillStyle = p.line;
+    ctx.beginPath(); ctx.arc(23, -2, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#2b2b3a';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(20.5, 0.5, 2.5, 0.2, 1.4); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawSheep(s) {
+    const p = SHEEP[s.color];
+    const hop = Math.abs(Math.sin(s.phase)) * 5;
+    const dir = s.ux >= 0 ? 1 : -1;
+    ctx.save();
+    ctx.globalAlpha = alphaOf(s);
+    ctx.translate(s.x, s.y - hop);
+    ctx.scale(dir, 1);
+
+    // little legs with hooves
+    ctx.fillStyle = p.face;
+    [[-11, 13], [-3, 13], [6, 13], [13, 13]].forEach(([x, y]) => {
+      ctx.beginPath(); ctx.ellipse(x, y, 3, 5.5, 0, 0, Math.PI * 2); ctx.fill();
+    });
+
+    // fluffy wool: outline pass, then fill pass
+    const puffs = [[-12, -3, 10], [-1, -10, 11], [10, -7, 10], [0, 1, 11], [-7, 4, 9], [7, 5, 8]];
+    ctx.fillStyle = WOOL_LINE;
+    puffs.forEach(([x, y, r]) => { ctx.beginPath(); ctx.arc(x, y, r + 1.6, 0, Math.PI * 2); ctx.fill(); });
+    ctx.fillStyle = p.wool;
+    puffs.forEach(([x, y, r]) => { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); });
+
+    // floppy ear
+    ctx.fillStyle = p.face;
+    ctx.beginPath(); ctx.ellipse(19, -13, 3.5, 5, 0.5, 0, Math.PI * 2); ctx.fill();
+
+    // cute face
+    ctx.fillStyle = p.face;
+    ctx.beginPath(); ctx.ellipse(21, -6, 8.5, 8, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.ellipse(21, -8, 3, 3.6, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#2b2b3a';
+    ctx.beginPath(); ctx.arc(21.8, -7.5, 1.9, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(22.5, -8.6, 0.7, 0, Math.PI * 2); ctx.fill();
+    // little tongue poking out below the smile
+    ctx.fillStyle = '#ff7fa8';
+    ctx.beginPath(); ctx.ellipse(26.3, -0.6, 1.1, 1.4, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.1;
+    ctx.beginPath(); ctx.arc(26.5, -2.5, 1.8, 0.2, 1.4); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawCloud(c) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,255,255,.92)';
+    const s = c.s;
+    [[0, 0, 22], [22, -8, 28], [48, 0, 22], [-22, 4, 18], [24, 10, 20]].forEach(([x, y, r]) => {
+      ctx.beginPath(); ctx.arc(c.x + x * s, c.y + y * s, r * s, 0, Math.PI * 2); ctx.fill();
+    });
+    ctx.restore();
+  }
+
+  function updateHud(t) {
+    const left = rabbits.length + (plan.length - spawned);
+    const secs = Math.max(0, Math.ceil((GAME_MS - t) / 1000));
+    hud.textContent = `Rabbits still hopping: ${left} · ${secs > 0 ? secs + 's' : 'almost done…'}`;
+  }
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - lastT) / 1000);
+    lastT = now;
+
+    if (running) {
+      const t = now - startTime;
+
+      while (spawned < plan.length && t >= spawnTimes[spawned]) {
+        rabbits.push(makeRabbit(plan[spawned]));
+        spawned++;
+      }
+
+      // sheep: white ones from 10s, pink & blue join from 24s
+      if (t < GAME_MS) {
+        if (t >= SHEEP_START && t >= nextWhite) { sheep.push(makeSheep('white')); nextWhite = t + rand(2200, 3400); }
+        if (t >= MIX_START) {
+          if (t >= nextPinkSheep) { sheep.push(makeSheep('pink')); nextPinkSheep = t + rand(3000, 4500); }
+          if (t >= nextBlueSheep) { sheep.push(makeSheep('blue')); nextBlueSheep = t + rand(3000, 4500); }
+        }
+      }
+
+      if (t >= nextCloud) { clouds.push(makeCloud()); nextCloud = t + rand(5000, 7000); }
+
+      for (const e of rabbits.concat(sheep)) {
+        e.traveled += e.speed * dt;
+        e.x = e.sx + e.ux * e.traveled;
+        e.y = e.sy + e.uy * e.traveled;
+        e.phase += dt * (e.type === 'rabbit' ? 6 + e.speed / 15 : 5);
+      }
+      for (const c of clouds) c.x += c.speed * dt;
+
+      rabbits = rabbits.filter(r => r.traveled < r.len);
+      sheep = sheep.filter(s => s.traveled < s.len);
+      clouds = clouds.filter(c => c.x < W + 170);
+
+      updateHud(t);
+      if (spawned === plan.length && rabbits.length === 0) endGame();
+    }
+
+    ctx.clearRect(0, 0, W, H);
+    for (const c of clouds) drawCloud(c);
+    ctx.fillStyle = 'rgba(255,255,255,.35)';
+    for (let i = 0; i < 40; i++) {
+      ctx.beginPath(); ctx.arc((i * 97) % W, H - 20 - ((i * 53) % 60), 2, 0, Math.PI * 2); ctx.fill();
+    }
+    for (const s of sheep) drawSheep(s);
+    for (const r of rabbits) drawRabbit(r);
+    requestAnimationFrame(frame);
+  }
+
+  function floatText(btn, text, color) {
+    const el = document.createElement('div');
+    el.className = 'float';
+    el.textContent = text;
+    el.style.color = color;
+    const r = btn.getBoundingClientRect();
+    const sr = stage.getBoundingClientRect();
+    el.style.left = (r.left + r.width / 2 - 10 - sr.left) + 'px';
+    el.style.top = (r.top - 30 - sr.top) + 'px';
+    stage.appendChild(el);
+    setTimeout(() => el.remove(), 800);
+  }
+
+  function tap(color) {
+    if (!running) return;
+    const btn = color === 'pink' ? pinkPad : bluePad;
+    if (color === 'pink') { tapPink++; pinkCountEl.textContent = tapPink; }
+    else { tapBlue++; blueCountEl.textContent = tapBlue; }
+    btn.classList.add('flash');
+    setTimeout(() => btn.classList.remove('flash'), 90);
+    floatText(btn, '+1', color === 'pink' ? '#e0609f' : '#3d93d6');
+  }
+
+  pinkPad.addEventListener('pointerdown', e => { e.preventDefault(); tap('pink'); });
+  bluePad.addEventListener('pointerdown', e => { e.preventDefault(); tap('blue'); });
+  window.addEventListener('keydown', e => {
+    if (e.repeat) return;
+    if (e.key === 'a' || e.key === 'A') tap('pink');
+    if (e.key === 'l' || e.key === 'L') tap('blue');
+  });
+
+  function showOverlay(html) {
+    overlayContent.innerHTML = html;
+    overlay.classList.add('show');
+  }
+
+  function startGame() {
+    const n = 36 + Math.floor(Math.random() * 9);
+    plan = buildPlan(n);
+    spawnTimes = plan.map((_, i) => (i + Math.random() * 0.8) / n * GAME_MS);
+    rabbits = []; sheep = []; clouds = [];
+    spawned = 0;
+    tapPink = 0; tapBlue = 0;
+    pinkCountEl.textContent = '0';
+    blueCountEl.textContent = '0';
+    nextWhite = SHEEP_START; nextPinkSheep = MIX_START; nextBlueSheep = MIX_START + 1500; nextCloud = 0;
+    overlay.classList.remove('show');
+    resize();
+    startTime = performance.now();
+    lastT = startTime;
+    running = true;
+  }
+
+  function endGame() {
+    running = false;
+    hud.textContent = '';
+    const pinks = plan.filter(c => c === 'pink').length;
+    const blues = plan.length - pinks;
+    showOverlay(`
+      <h1>And the winner is…</h1>
+      <div class="big" style="color:#e0609f">PINK! 💗</div>
+      <p>There were <b style="color:#e0609f">${pinks}</b> pink bunnies and <b style="color:#3d93d6">${blues}</b> blue bunnies.</p>
+      <p>Pink bunnies were actually more than the blue ones all along.</p>
+      <p style="font-size:18px;margin-top:16px">Guess Sean has to learn to tie braids for our princess! 👑</p>
+      <p style="font-size:15px;opacity:.7;margin-top:14px">Your count: pink ${tapPink} · blue ${tapBlue}</p>
+      <button onclick="location.reload()">Play again</button>
+    `);
+  }
+
+  function showStart() {
+    showOverlay(`
+      <h1>🐰 Bunny Gender Reveal</h1>
+      <p>🩷 Tap <b style="color:#e0609f">PINK</b> for each pink bunny</p>
+      <p>💙 Tap <b style="color:#3d93d6">BLUE</b> for each blue bunny</p>
+      <button id="startBtn">Start</button>
+    `);
+    document.getElementById('startBtn').addEventListener('click', startGame);
+  }
+
+  resize();
+  showStart();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
